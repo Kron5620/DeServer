@@ -19,11 +19,16 @@
 ## 🌟 Features
 
 * **Plug‑and‑play HTTP Server** – Single shaded JAR, zero external deps.
-* **ServiceLoader extensions** – Drop JARs into `/extensions` & they auto‑load.
-* **Bi‑directional Comms** – Commands → Unity & snapshots ← Unity, over plain JSON.
-* **GUI or CLI** – Swing log window when a display is present, or `nogui` for headless.
-* **Hot telemetry** – Players, camera position, object snapshots every *N* seconds.
-* **Scripting‑friendly** – Send `create`, `edit`, `mesh`, `tween`, `turn` … commands.
+* **ServiceLoader extensions** – Drop JARs into `/extensions` & they auto‑load (`ext load` / `unload` / `reload`).
+* **Bi‑directional Comms** – Commands → Unity and snapshots ← Unity, over plain JSON.
+* **GUI or CLI** – Swing log window when a display is present, or `nogui` for headless mode.
+* **Server Properties** – Auto‑generate and load `server.properties` for IP & port settings.
+* **Player Data Persistence** – Caches per‑player state & object snapshots under `player-data/`.
+* **Timeout & Reconnection** – Detects client disconnects after inactivity and auto‑retries.
+* **Pause/Resume Detection** – Tracks in‑game pause menu and logs pause/resume events.
+* **Hot Telemetry** – Streams player position, rotation, camera pos, and full scene objects at *N* second intervals.
+* **Console Commands** – `tp`, `location`, `clientsideobject`, `stop`, plus extension management (`ext list|load|unload|reload`).
+* **Scripting‑friendly API** – Send `create`, `edit`, `mesh`, `tween`, `turn`, poll inputs (`pollInputs`), query state (`isPaused`/`isRunning`), get snapshots (`getObjectsJson`).
 
 ---
 
@@ -86,13 +91,14 @@ extensions/           # drop‑in jars
 
 ### CLI Commands (type in server console)
 
-| Command                  | Purpose                                        |
-| ------------------------ | ---------------------------------------------- |
-| `stop`                   | graceful shutdown                              |
-| `tp <sid> x y z`         | teleport player                                |
-| `location <sid>`         | print cached pos / rot                         |
-| `clientsideobject <sid>` | dump last object snapshot                      |
-| `create` / `edit`        | low‑level spawn / mutate (see help in console) |
+| Command                  | Purpose                                        |             |               |                   |
+| ------------------------ | ---------------------------------------------- | ----------- | ------------- | ----------------- |
+| `stop`                   | graceful shutdown                              |             |               |                   |
+| `tp <sid> x y z`         | teleport player                                |             |               |                   |
+| `location <sid>`         | print cached pos / rot                         |             |               |                   |
+| `clientsideobject <sid>` | dump last object snapshot                      |             |               |                   |
+| `create` / `edit`        | low‑level spawn / mutate (see help in console) |             |               |                   |
+| \`ext list               | load <jar>                                     | unload <id> | reload <id>\` | manage extensions |
 
 ---
 
@@ -112,8 +118,8 @@ extensions/           # drop‑in jars
      | -------------------- | ---------------------- | ------------------------------------------------------- |
      | **Server Ip**        | `127.0.0.1`            | **Your server’s LAN / public IP** (e.g. `192.168.1.42`) |
      | **Server Port**      | `19299`                | **The port your server is listening on**                |
-     | **Timeout Sec**      | `2`                    | *(Leave as-is unless you need longer timeouts)*         |
-     | **Objects Interval** | `1`                    | *(Leave as-is; sends object updates every second)*      |
+     | **Timeout Sec**      | `2`                    | *(Leave as‑is unless you need longer timeouts)*         |
+     | **Objects Interval** | `1`                    | *(Leave as‑is; sends object updates every second)*      |
 
 3. **Build your Mod** with ModTool as usual. The client will attempt to connect on play and you should see `Connect from ...` in the Java window.
 
@@ -140,8 +146,7 @@ Extensions are **plain Java jars** exposing `club.kron.pumpin.Extension` via Jav
       <artifactId>DeServer</artifactId>
       <version>1.0-SNAPSHOT</version>
       <scope>provided</scope>
-    </dependency>
-  </dependencies>
+    </dependencies>
 
   <build>
     <plugins>
@@ -176,19 +181,19 @@ public final class GreetingExtension implements Extension {
     @Override
     public void onEnable(ServerAPI api, File dataFolder) {
         this.api = api;
-        api.log("👋 GreetingExtension online – clients: " + api.getActiveClients().size());
+        api.log("👋 GreetingExtension online – clients: " + api.getActiveClients().size());
     }
 
     @Override
     public void onDisable() {
-        api.log("👋 GreetingExtension offline.");
+        api.log("👋 GreetingExtension offline.");
     }
 
     @Override
     public boolean onConsoleInput(String line) {
         if (line.equalsIgnoreCase("hello")) {
             api.log("Hello back atcha!");
-            return true; // consumed
+            return true;
         }
         return false;
     }
@@ -215,28 +220,19 @@ cp target/greeting-extension-*.jar ~/DeServer/extensions/
 
 ## 📚 DeServer API Cheat Sheet
 
-| Method                             | Description                                       |         |                             |
-| ---------------------------------- | ------------------------------------------------- | ------- | --------------------------- |
-| `log(msg)`                         | Write to console & broadcast to other extensions  |         |                             |
-| `getActiveClients()`               | `Set<String>` of \`ip                             | steamID | name\` of connected clients |
-| `enqueueCommand(sid,json)`         | Push raw JSON command string to a specific client |         |                             |
-| `teleport(sid,x,y,z)`              | Instant player warp                               |         |                             |
-| `isPaused(sid)` / `isRunning(sid)` | Query client state                                |         |                             |
-| `suppressAckLog(label)`            | Hide certain ACK spam lines                       |         |                             |
-| `getExtensionsRoot()`              | `File` pointing at `/extensions` dir              |         |                             |
+| Method                                     | Description                                       |
+| ------------------------------------------ | ------------------------------------------------- |
+| `log(msg)`                                 | Write to console & broadcast to other extensions  |
+| `getActiveClients()`                       | Get `Set<String>` of connected clients            |
+| `pollInputs(steamID)`                      | Retrieve queued input events for a client         |
+| `isPaused(steamID)` / `isRunning(steamID)` | Query client pause/run state                      |
+| `enqueueCommand(sid, json)`                | Push raw JSON command string to a specific client |
+| `teleport(sid, x, y, z)`                   | Instant player warp                               |
+| `getObjectsJson(steamID)`                  | Fetch last object snapshot JSON for a client      |
+| `suppressAckLog(label)`                    | Hide certain ACK spam lines                       |
+| `getExtensionsRoot()`                      | `File` pointing at `/extensions` dir              |
 
 Full docs live in `ServerAPI.java`.
-
----
-
-## 🧐 Troubleshooting
-
-| Problem                                     | Remedy                                                                           |
-| ------------------------------------------- | -------------------------------------------------------------------------------- |
-| **`BindException: Address already in use`** | Another process is on that port. Pass `--port=`.                                 |
-| No connection messages                      | Check firewall / IP mismatch; confirm ModTool bundled the script.                |
-| Extension not detected                      | Verify `META-INF/services` file and that you restarted the server.               |
-| Unity `NetworkError`                        | Server unreachable (wrong IP) or JSON payload too big – try higher `timeoutSec`. |
 
 ---
 
