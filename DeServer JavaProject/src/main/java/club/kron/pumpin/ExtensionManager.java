@@ -6,27 +6,34 @@ import java.net.URLClassLoader;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Runtime loader / unloader / reloader for server extensions. */
 final class ExtensionManager {
 
-    /** One entry per enabled extension. */
     private static final class ExtHolder {
-        final String            id;
-        final File              jar;
-        final URLClassLoader    cl;
-        final Extension         instance;
+        final String id;
+        final File jar;
+        final URLClassLoader cl;
+        final Extension instance;
         ExtHolder(String id, File jar, URLClassLoader cl, Extension instance) {
             this.id = id; this.jar = jar; this.cl = cl; this.instance = instance;
         }
     }
 
-    /** id → holder */
     private static final Map<String, ExtHolder> LOADED = new ConcurrentHashMap<>();
     private static final ServerAPI API = new ServerAPI();
 
-    /* ───────────────────────── public API ───────────────────────── */
+    static boolean forwardConsoleInput(String line) {
+        boolean handled = false;
+        for (ExtHolder h : LOADED.values()) {
+            try {
+                if (h.instance.onConsoleInput(line))
+                    handled = true;
+            } catch (Throwable t) {
+                Main.log("[EXT] " + h.id + ".onConsoleInput error: " + t.getMessage());
+            }
+        }
+        return handled;
+    }
 
-    /** Loads every *.jar in /extensions (startup helper). */
     static void loadAll() {
         File dir = API.getExtensionsRoot();
         if (!dir.exists()) dir.mkdirs();
@@ -40,7 +47,6 @@ final class ExtensionManager {
         Main.log("[EXT] Total enabled: " + LOADED.size());
     }
 
-    /** Dynamically (re-)loads a JAR; returns true on success. */
     static boolean loadJar(File jar) {
         if (jar == null || !jar.isFile()) {
             Main.log("[EXT] load: file not found – " + jar);
@@ -75,19 +81,10 @@ final class ExtensionManager {
         }
     }
 
-    /** Disables and removes a single extension by simple-class-name. */
-    /* ─────────────────────────────────────────────────────────────
-   ExtensionManager.java – FULL unload(...) method
-   Accepts ID or JAR name (case-insensitive)                    */
     static boolean unload(String arg) {
-
-        /* first try direct ID match */
         ExtHolder h = LOADED.remove(arg);
-
-        /* if not found, try by JAR filename */
         if (h == null) {
-            for (Iterator<Map.Entry<String, ExtHolder>> it = LOADED.entrySet().iterator();
-                 it.hasNext(); ) {
+            for (Iterator<Map.Entry<String, ExtHolder>> it = LOADED.entrySet().iterator(); it.hasNext(); ) {
                 Map.Entry<String, ExtHolder> e = it.next();
                 if (e.getValue().jar.getName().equalsIgnoreCase(arg)) {
                     h = e.getValue();
@@ -96,26 +93,17 @@ final class ExtensionManager {
                 }
             }
         }
-
         if (h == null) {
             Main.log("[EXT] unload: '" + arg + "' not loaded.");
             return false;
         }
-
         try { h.instance.onDisable(); } catch (Exception ignore) {}
-        try { h.cl.close(); }        catch (Exception ignore) {}
-
+        try { h.cl.close(); } catch (Exception ignore) {}
         Main.log("[EXT] Unloaded " + h.id);
         return true;
     }
 
-
-    /* ─────────────────────────────────────────────────────────────
-   ExtensionManager.java – FULL reload(...) method
-   Accepts ID or JAR name, does unload + load in one step        */
     static boolean reload(String arg) {
-
-        /* locate by ID or JAR name */
         ExtHolder h = LOADED.get(arg);
         if (h == null) {
             for (ExtHolder eh : LOADED.values()) {
@@ -125,25 +113,20 @@ final class ExtensionManager {
                 }
             }
         }
-
         if (h == null) {
             Main.log("[EXT] reload: '" + arg + "' not loaded.");
             return false;
         }
-
         File jar = h.jar;
-        unload(h.id);          // guaranteed to succeed because h is loaded
+        unload(h.id);
         return loadJar(jar);
     }
 
-
-    /** Disables every extension (server shutdown helper). */
     static void disableAll() {
         for (String id : new ArrayList<>(LOADED.keySet())) unload(id);
         Main.log("[EXT] All extensions disabled");
     }
 
-    /** Handles “ext …” console commands. Returns true if consumed. */
     static boolean handleConsole(String line) {
         String[] tok = line.trim().split("\\s+");
         if (tok.length == 0 || !"ext".equalsIgnoreCase(tok[0])) return false;
@@ -158,23 +141,19 @@ final class ExtensionManager {
                 else for (ExtHolder h : LOADED.values())
                     Main.log("[EXT] " + h.id + "  (" + h.jar.getName() + ')');
                 return true;
-
             case "load":
                 if (tok.length < 3) { Main.log("[EXT] load <jarFileName>"); return true; }
                 File jar = new File(API.getExtensionsRoot(), tok[2]);
                 loadJar(jar);
                 return true;
-
             case "unload":
                 if (tok.length < 3) { Main.log("[EXT] unload <id>"); return true; }
                 unload(tok[2]);
                 return true;
-
             case "reload":
                 if (tok.length < 3) { Main.log("[EXT] reload <id>"); return true; }
                 reload(tok[2]);
                 return true;
-
             default:
                 Main.log("[EXT] Unknown sub-command. Try: ext help");
                 return true;

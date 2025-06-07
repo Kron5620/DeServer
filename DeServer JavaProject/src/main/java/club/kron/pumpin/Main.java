@@ -50,8 +50,6 @@ public class Main {
         return list;
     }
 
-
-
     private static final java.util.Map<String, Long> clientLastSeen =
             new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Map<String, String> playerPositions =
@@ -98,8 +96,6 @@ public class Main {
                 }
             }
         }
-
-
 
         if (guiMode)
             javax.swing.SwingUtilities.invokeLater(Main::createAndShowGui);
@@ -251,8 +247,6 @@ public class Main {
         }
     }
 
-
-
     private static void startListeningThread() {
         Thread t = new Thread(() -> {
             try {
@@ -375,7 +369,6 @@ public class Main {
                                     break;
                                 }
 
-                                /* ── object snapshot ───────────────────── */
                                 case "objects": {
                                     String data = extractJson(body, "data");
                                     playerObjects.put(steamID, data);
@@ -392,7 +385,6 @@ public class Main {
                                     break;
                                 }
 
-                                /* ── explicit disconnect ───────────────── */
                                 case "disconnect": {
                                     log("[INFO] Disconnect        from " + clientIp +
                                             " | Name=\"" + playerName + "\", SteamID=" + steamID);
@@ -407,7 +399,6 @@ public class Main {
                                     break;
                                 }
 
-                                /* ── pause / resume state ─────────────── */
                                 case "pause": {
                                     String state = extractJson(body, "state").toLowerCase();
                                     boolean on = "on".equals(state) || "true".equals(state) || "1".equals(state);
@@ -423,11 +414,9 @@ public class Main {
                                     break;
                                 }
 
-                                /* ── unknown / unhandled ──────────────── */
                                 default: break;
                             }
 
-                            /* first sighting (non-disconnect) → connect log */
                             if (!activeClients.contains(key) && !"disconnect".equals(evt)) {
                                 activeClients.add(key);
                                 log("[INFO] Connect           from " + clientIp +
@@ -451,10 +440,6 @@ public class Main {
         t.setDaemon(true);
         t.start();
     }
-
-
-
-
 
     private static void respondForbidden(PrintWriter out) {
         String body = "Forbidden";
@@ -664,10 +649,10 @@ public class Main {
                 line = line.trim();
                 if (line.isEmpty()) continue;
 
-                /* ── extension commands ────────────────────────────── */
+                if (ExtensionManager.forwardConsoleInput(line)) continue;
+
                 if (ExtensionManager.handleConsole(line)) continue;
 
-                /* ── built-in commands ─────────────────────────────── */
                 if (line.equalsIgnoreCase("help") || line.equals("?")) {
                     log("[INFO] Commands:");
                     log("[INFO]   stop");
@@ -979,4 +964,9 @@ public class Main {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
         return now.format(fmt);
     }
+
+    public static String getObjectsSnapshot(String steamID) {
+        return playerObjects.get(steamID);
+    }
+
 }
