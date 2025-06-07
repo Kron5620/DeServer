@@ -4,6 +4,7 @@ using UnityEngine.SceneManagement;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
+using ModTool.Interface;
 using UnityEngine.UI;
 using ModTool.Interface;
 
@@ -335,8 +336,8 @@ public class ClientManager : ModBehaviour
     private IEnumerator CommandLoop()
     {
         WaitForSeconds wait = new WaitForSeconds(0.5f);
-        string url = "http://" + serverIp + ":" + serverPort + "/cmd?steamID=" +
-                     UnityWebRequest.EscapeURL(id.steamID);
+        string url = "http://" + serverIp + ":" + serverPort +
+                     "/cmd?steamID=" + UnityWebRequest.EscapeURL(id.steamID);
 
         while (true)
         {
@@ -344,67 +345,254 @@ public class ClientManager : ModBehaviour
             req.timeout = timeoutSec;
             yield return req.SendWebRequest();
 
-            if (!req.isNetworkError && !req.isHttpError && !string.IsNullOrEmpty(req.downloadHandler.text))
+            if (!req.isNetworkError && !req.isHttpError)
             {
-                CommandList cl = JsonUtility.FromJson<CommandList>(req.downloadHandler.text);
-                if (cl != null && cl.commands != null)
+                string txt = req.downloadHandler.text;
+                if (!string.IsNullOrEmpty(txt))
                 {
-                    foreach (string raw in cl.commands) ApplyCommand(raw);
+                    string[] cmds = ParseCommandArray(txt);
+                    if (cmds != null)
+                        for (int i = 0; i < cmds.Length; i++)
+                            ApplyCommand(cmds[i]);
                 }
             }
             yield return wait;
         }
     }
 
+    private static string[] ParseCommandArray(string json)
+    {
+        const string key = "\"commands\":[";
+        int start = json.IndexOf(key, System.StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+
+        start += key.Length;
+        int end = json.IndexOf(']', start);
+        if (end < 0) return null;
+
+        string contents = json.Substring(start, end - start);
+        if (string.IsNullOrEmpty(contents)) return new string[0];
+
+        List<string> list = new List<string>();
+        int idx = 0;
+
+        while (idx < contents.Length)
+        {
+            while (idx < contents.Length && contents[idx] != '"') idx++;
+            if (++idx >= contents.Length) break;
+
+            int strStart = idx;
+            bool escape = false;
+
+            while (idx < contents.Length)
+            {
+                char c = contents[idx++];
+                if (escape) { escape = false; continue; }
+                if (c == '\\') { escape = true; continue; }
+                if (c == '"') break;
+            }
+            int strEnd = idx - 1;
+            string cmd = contents.Substring(strStart, strEnd - strStart)
+                                 .Replace("\\\"", "\"")
+                                 .Replace("\\\\", "\\");
+            list.Add(cmd);
+
+            while (idx < contents.Length && contents[idx] != '"') idx++;
+        }
+
+        return list.ToArray();
+    }
+
     private void ApplyCommand(string json)
     {
-        if (string.IsNullOrEmpty(json)) return;
-
-        if (json.IndexOf("\"cmd\":\"timeline\"", System.StringComparison.OrdinalIgnoreCase) != -1)
-        {
-            TimelineCmd tl = JsonUtility.FromJson<TimelineCmd>(json);
-            if (tl != null && tl.entries != null && tl.entries.Length > 0)
-                ApplyTimeline(tl);
+        if (string.IsNullOrEmpty(json))
             return;
-        }
 
-        if (json.IndexOf("\"cmd\":\"create\"", System.StringComparison.OrdinalIgnoreCase) != -1)
-        {
-            CreateCmd c = JsonUtility.FromJson<CreateCmd>(json);
-            if (c != null && c.components == null)
-                c.components = ParseComponents(json);
-            if (c != null) ApplyCreate(c);
-            return;
-        }
+        int p = json.IndexOf("\"cmd\":\"", System.StringComparison.OrdinalIgnoreCase);
+        if (p < 0) return;
+        p += 6;
+        int q = json.IndexOf('"', p);
+        if (q < 0) return;
+        string cmd = json.Substring(p, q - p).ToLowerInvariant();
 
-        if (json.IndexOf("\"cmd\":\"mesh\"", System.StringComparison.OrdinalIgnoreCase) != -1)
+        switch (cmd)
         {
-            MeshCmd m = JsonUtility.FromJson<MeshCmd>(json);
-            if (m != null) ApplyMesh(m);
-            return;
+            case "timeline": ApplyTimeline(ParseTimeline(json)); break;
+            case "create":   ApplyCreate  (ParseCreate  (json)); break;
+            case "mesh":     ApplyMesh    (ParseMesh    (json)); break;
+            case "edit":     ApplyEdit    (ParseEdit    (json)); break;
+            case "tween":    ApplyTween   (ParseTween   (json)); break;
+            case "turn":     ApplyTurn    (ParseTurn    (json)); break;
+            default:         Debug.LogWarning("[ClientManager] Unknown cmd \"" + cmd + '\"'); break;
         }
+    }
 
-        if (json.IndexOf("\"cmd\":\"edit\"", System.StringComparison.OrdinalIgnoreCase) != -1)
-        {
-            EditCmd e = JsonUtility.FromJson<EditCmd>(json);
-            if (e != null && e.components == null)
-                e.components = ParseComponents(json);
-            if (e != null) ApplyEdit(e);
-            return;
-        }
+    private TimelineCmd ParseTimeline(string src)
+    {
+        TimelineCmd tl = new TimelineCmd();
+        tl.cmd   = "timeline";
+        tl.label = ReadString(src, "\"label\":\"", null);
 
-        if (json.IndexOf("\"cmd\":\"tween\"", System.StringComparison.OrdinalIgnoreCase) != -1)
-        {
-            TweenCmd t = JsonUtility.FromJson<TweenCmd>(json);
-            if (t != null) ApplyTween(t);
-            return;
-        }
+        List<TimelineEntry> list = new List<TimelineEntry>();
 
-        if (json.IndexOf("\"cmd\":\"turn\"", System.StringComparison.OrdinalIgnoreCase) != -1)
+        int arrStart = src.IndexOf("\"entries\":[", System.StringComparison.OrdinalIgnoreCase);
+        if (arrStart >= 0)
         {
-            TurnCmd old = JsonUtility.FromJson<TurnCmd>(json);
-            if (old != null) ApplyTurn(old);
+            arrStart += 11;
+            int arrEnd = src.IndexOf(']', arrStart);
+            if (arrEnd > arrStart)
+            {
+                string arr = src.Substring(arrStart, arrEnd - arrStart);
+                string[] pieces = arr.Split(new[] { "},{" }, System.StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < pieces.Length; i++)
+                {
+                    string p = pieces[i];
+                    float off = ReadFloat(p, "\"offset\":", 0f);
+                    string js = ReadString(p, "\"json\":\"", "{}");
+                    if (!js.StartsWith("{")) js = "{" + js;
+                    if (!js.EndsWith("}")) js += "}";
+                    list.Add(new TimelineEntry { offset = off, json = js });
+                }
+            }
         }
+        tl.entries = list.ToArray();
+        return tl;
+    }
+
+    private CreateCmd ParseCreate(string src)
+    {
+        CreateCmd c = new CreateCmd();
+        c.cmd    = "create";
+        c.src    = ReadString(src, "\"src\":\"", "");
+        c.x      = ReadFloat(src, "\"x\":", 0f);
+        c.y      = ReadFloat(src, "\"y\":", 0f);
+        c.z      = ReadFloat(src, "\"z\":", 0f);
+        c.rx     = ReadFloat(src, "\"rx\":", 0f);
+        c.ry     = ReadFloat(src, "\"ry\":", 0f);
+        c.rz     = ReadFloat(src, "\"rz\":", 0f);
+        c.sx     = ReadFloat(src, "\"sx\":", 1f);
+        c.sy     = ReadFloat(src, "\"sy\":", 1f);
+        c.sz     = ReadFloat(src, "\"sz\":", 1f);
+        c.color  = ReadString(src, "\"color\":\"", null);
+        c.rename = ReadString(src, "\"rename\":\"", null);
+        c.components = ParseComponents(src);
+        return c;
+    }
+
+    private MeshCmd ParseMesh(string src)
+    {
+        MeshCmd m = new MeshCmd();
+        m.cmd   = "mesh";
+        m.src   = ReadString(src, "\"src\":\"", "");
+        m.data  = ReadString(src, "\"data\":\"", "");
+        m.x     = ReadFloat(src, "\"x\":", 0f);
+        m.y     = ReadFloat(src, "\"y\":", 0f);
+        m.z     = ReadFloat(src, "\"z\":", 0f);
+        m.rx    = ReadFloat(src, "\"rx\":", 0f);
+        m.ry    = ReadFloat(src, "\"ry\":", 0f);
+        m.rz    = ReadFloat(src, "\"rz\":", 0f);
+        m.sx    = ReadFloat(src, "\"sx\":", 1f);
+        m.sy    = ReadFloat(src, "\"sy\":", 1f);
+        m.sz    = ReadFloat(src, "\"sz\":", 1f);
+        m.color = ReadString(src, "\"color\":\"", null);
+        return m;
+    }
+
+    private EditCmd ParseEdit(string src)
+    {
+        EditCmd e = new EditCmd();
+        e.cmd     = "edit";
+        e.target  = ReadString(src, "\"target\":\"", "");
+        e.delete  = ReadBool(src, "\"delete\":", false);
+        e.x       = ReadFloat(src, "\"x\":", 0f);
+        e.y       = ReadFloat(src, "\"y\":", 0f);
+        e.z       = ReadFloat(src, "\"z\":", 0f);
+        e.rx      = ReadFloat(src, "\"rx\":", 0f);
+        e.ry      = ReadFloat(src, "\"ry\":", 0f);
+        e.rz      = ReadFloat(src, "\"rz\":", 0f);
+        e.sx      = ReadFloat(src, "\"sx\":", 1f);
+        e.sy      = ReadFloat(src, "\"sy\":", 1f);
+        e.sz      = ReadFloat(src, "\"sz\":", 1f);
+        e.color   = ReadString(src, "\"color\":\"", null);
+        e.copytex = ReadString(src, "\"copytex\":\"", null);
+        e.rename  = ReadString(src, "\"rename\":\"", null);
+        e.text    = ReadString(src, "\"text\":\"", null);
+        e.vx      = ReadFloat(src, "\"vx\":", 0f);
+        e.vy      = ReadFloat(src, "\"vy\":", 0f);
+        e.vz      = ReadFloat(src, "\"vz\":", 0f);
+        e.components = ParseComponents(src);
+        return e;
+    }
+
+    private TweenCmd ParseTween(string src)
+    {
+        TweenCmd t = new TweenCmd();
+        t.cmd      = "tween";
+        t.target   = ReadString(src, "\"target\":\"", "");
+        t.dx       = ReadFloat(src, "\"dx\":", 0f);
+        t.dy       = ReadFloat(src, "\"dy\":", 0f);
+        t.dz       = ReadFloat(src, "\"dz\":", 0f);
+        t.drx      = ReadFloat(src, "\"drx\":", 0f);
+        t.dry      = ReadFloat(src, "\"dry\":", 0f);
+        t.drz      = ReadFloat(src, "\"drz\":", 0f);
+        t.dsx      = ReadFloat(src, "\"dsx\":", 0f);
+        t.dsy      = ReadFloat(src, "\"dsy\":", 0f);
+        t.dsz      = ReadFloat(src, "\"dsz\":", 0f);
+        t.duration = ReadFloat(src, "\"duration\":", 1f);
+        return t;
+    }
+
+    private TurnCmd ParseTurn(string src)
+    {
+        TurnCmd trn = new TurnCmd();
+        trn.cmd      = "turn";
+        trn.target   = ReadString(src, "\"target\":\"", "");
+        trn.drx      = ReadFloat(src, "\"drx\":", 0f);
+        trn.dry      = ReadFloat(src, "\"dry\":", 0f);
+        trn.drz      = ReadFloat(src, "\"drz\":", 0f);
+        trn.duration = ReadFloat(src, "\"duration\":", 1f);
+        return trn;
+    }
+
+    private static string ReadString(string json, string key, string def)
+    {
+        int idx = json.IndexOf(key, System.StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return def;
+        idx += key.Length;
+        int end = json.IndexOf('"', idx);
+        if (end < 0) return def;
+        return json.Substring(idx, end - idx)
+                   .Replace("\\\"", "\"")
+                   .Replace("\\\\", "\\");
+    }
+
+    private static float ReadFloat(string json, string key, float def)
+    {
+        int idx = json.IndexOf(key, System.StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return def;
+        idx += key.Length;
+        int end = idx;
+        while (end < json.Length && "0123456789+-.eE".IndexOf(json[end]) != -1)
+            end++;
+        float val;
+        return float.TryParse(json.Substring(idx, end - idx),
+                              System.Globalization.NumberStyles.Float,
+                              System.Globalization.CultureInfo.InvariantCulture,
+                              out val) ? val : def;
+    }
+
+    private static bool ReadBool(string json, string key, bool def)
+    {
+        int idx = json.IndexOf(key, System.StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return def;
+        idx += key.Length;
+        if (json.Length >= idx + 4 &&
+            json.Substring(idx, 4).Equals("true", System.StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (json.Length >= idx + 5 &&
+            json.Substring(idx, 5).Equals("false", System.StringComparison.OrdinalIgnoreCase))
+            return false;
+        return def;
     }
 
     private void ApplyTimeline(TimelineCmd tl)
@@ -783,40 +971,54 @@ public class ClientManager : ModBehaviour
         }
 
         GameObject go = Instantiate(proto);
-
-        go.transform.position = new Vector3(m.x, m.y, m.z);
-        go.transform.rotation = Quaternion.Euler(m.rx, m.ry, m.rz);
+        go.transform.position   = new Vector3(m.x,  m.y,  m.z);
+        go.transform.rotation   = Quaternion.Euler(m.rx, m.ry, m.rz);
         go.transform.localScale = new Vector3(m.sx, m.sy, m.sz);
 
-        byte[] raw = System.Convert.FromBase64String(m.data);
-        string json = System.Text.Encoding.UTF8.GetString(raw);
-        MeshDTO dto = JsonUtility.FromJson<MeshDTO>(json);
-        if (dto == null || dto.v == null || dto.t == null)
+        byte[] raw;
+        try      { raw = System.Convert.FromBase64String(m.data ?? ""); }
+        catch    { Debug.LogWarning("[ClientManager] Mesh data is not valid base-64."); Destroy(go); return; }
+
+        string j  = System.Text.Encoding.UTF8.GetString(raw);
+        const string KV = "\"v\":[";
+        const string KT = "\"t\":[";
+        int v0 = j.IndexOf(KV, System.StringComparison.OrdinalIgnoreCase);
+        int t0 = j.IndexOf(KT, System.StringComparison.OrdinalIgnoreCase);
+        if (v0 < 0 || t0 < 0) { Debug.LogWarning("[ClientManager] Mesh JSON missing arrays."); Destroy(go); return; }
+
+        v0 += KV.Length;
+        int v1 = j.IndexOf(']', v0);
+        string[] vParts = j.Substring(v0, v1 - v0).Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries);
+
+        if (vParts.Length % 3 != 0) { Debug.LogWarning("[ClientManager] Vert count not divisible by 3."); Destroy(go); return; }
+        int vCount = vParts.Length / 3;
+        Vector3[] verts = new Vector3[vCount];
+
+        for (int i = 0, v = 0; v < vCount; v++, i += 3)
         {
-            Debug.LogWarning("[ClientManager] Bad mesh data.");
-            Destroy(go);
-            return;
+            float x = float.Parse(vParts[i],     System.Globalization.CultureInfo.InvariantCulture);
+            float y = float.Parse(vParts[i + 1], System.Globalization.CultureInfo.InvariantCulture);
+            float z = float.Parse(vParts[i + 2], System.Globalization.CultureInfo.InvariantCulture);
+            verts[v] = new Vector3(x, y, z);
         }
 
-        int vCount = dto.v.Length / 3;
-        Vector3[] verts = new Vector3[vCount];
-        for (int i = 0, v = 0; v < vCount; v++, i += 3)
-            verts[v] = new Vector3(dto.v[i], dto.v[i + 1], dto.v[i + 2]);
+        t0 += KT.Length;
+        int t1 = j.IndexOf(']', t0);
+        string[] tParts = j.Substring(t0, t1 - t0).Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries);
+        int[] tris = new int[tParts.Length];
+        for (int i = 0; i < tParts.Length; i++)
+            tris[i] = int.Parse(tParts[i], System.Globalization.CultureInfo.InvariantCulture);
 
         Mesh mesh = new Mesh();
-        mesh.vertices = verts;
-        mesh.triangles = dto.t;
+        mesh.vertices  = verts;
+        mesh.triangles = tris;
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
-        MeshFilter mf = go.GetComponent<MeshFilter>();
-        if (mf == null)
-            mf = AddComponent(typeof(MeshFilter), go) as MeshFilter;
+        MeshFilter mf = go.GetComponent<MeshFilter>() ?? AddComponent(typeof(MeshFilter), go) as MeshFilter;
         mf.sharedMesh = mesh;
 
-        MeshRenderer mr = go.GetComponent<MeshRenderer>();
-        if (mr == null)
-            mr = AddComponent(typeof(MeshRenderer), go) as MeshRenderer;
+        MeshRenderer mr = go.GetComponent<MeshRenderer>() ?? AddComponent(typeof(MeshRenderer), go) as MeshRenderer;
         mr.enabled = true;
 
         if (!string.IsNullOrEmpty(m.color) && !"none".Equals(m.color))
@@ -825,14 +1027,12 @@ public class ClientManager : ModBehaviour
             Color col;
             if (ColorUtility.TryParseHtmlString(cs, out col))
             {
-                if (mr.material == null)
-                    mr.material = new Material(Shader.Find("Standard"));
+                mr.material = mr.material ?? new Material(Shader.Find("Standard"));
                 mr.material.color = col;
             }
         }
 
-        Debug.Log("[ClientManager] Mesh spawned – verts: " + vCount + ", tris: "
-                  + dto.t.Length / 3);
+        Debug.Log("[ClientManager] Mesh spawned – verts: " + verts.Length + ", tris: " + (tris.Length / 3));
     }
 
     private void ApplyCreate(CreateCmd c)
@@ -1107,8 +1307,29 @@ public class ClientManager : ModBehaviour
         return JsonUtility.FromJson<Identification>(raw);
     }
 
-    private static Component AddComponent(System.Type t, GameObject go)
+    private static Component AddComponent(System.Type type, GameObject host)
     {
-        return go.AddComponent(t);
+        if (type == null || host == null)
+            return null;
+
+        ModBehaviour mb = host.GetComponent<ModBehaviour>();
+        if (mb == null)
+        {
+            Debug.LogWarning("[ClientManager] Cannot add '" + type +
+                             "' to '" + host.name +
+                             "' – object lacks required ModBehaviour wrapper.");
+            return null;
+        }
+
+        try
+        {
+            return mb.AddComponent(type, host);
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning("[ClientManager] Failed to add '" + type +
+                             "' to '" + host.name + "': " + ex.Message);
+            return null;
+        }
     }
 }
