@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using ModTool.Interface;
+using System;
 using UnityEngine.UI;
 using ModTool.Interface;
 
@@ -408,11 +409,15 @@ public class ClientManager : ModBehaviour
         if (string.IsNullOrEmpty(json))
             return;
 
-        int p = json.IndexOf("\"cmd\":\"", System.StringComparison.OrdinalIgnoreCase);
+        const string cmdKey = "\"cmd\":\"";
+        int p = json.IndexOf(cmdKey, System.StringComparison.OrdinalIgnoreCase);
         if (p < 0) return;
-        p += 6;
+
+        p += cmdKey.Length;
+
         int q = json.IndexOf('"', p);
         if (q < 0) return;
+
         string cmd = json.Substring(p, q - p).ToLowerInvariant();
 
         switch (cmd)
@@ -423,9 +428,13 @@ public class ClientManager : ModBehaviour
             case "edit":     ApplyEdit    (ParseEdit    (json)); break;
             case "tween":    ApplyTween   (ParseTween   (json)); break;
             case "turn":     ApplyTurn    (ParseTurn    (json)); break;
-            default:         Debug.LogWarning("[ClientManager] Unknown cmd \"" + cmd + '\"'); break;
+            default:
+                Debug.LogWarning("[ClientManager] Unknown cmd \"" + cmd + '\"');
+                break;
         }
     }
+
+
 
     private TimelineCmd ParseTimeline(string src)
     {
