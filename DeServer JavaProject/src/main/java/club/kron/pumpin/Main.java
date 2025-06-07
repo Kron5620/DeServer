@@ -31,6 +31,27 @@ public class Main {
     private static String bindIp = DEFAULT_IP;
     private static int bindPort = DEFAULT_PORT;
 
+    private static final java.util.Map<String, java.util.Queue<String>> inputEvents =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static void addInputEvent(String steamID, String key) {
+        if (key == null || key.isEmpty()) return;
+        inputEvents
+                .computeIfAbsent(steamID, k -> new java.util.concurrent.ConcurrentLinkedQueue<>())
+                .add(key);
+    }
+
+    public static java.util.List<String> pollInputs(String steamID) {
+        java.util.Queue<String> q = inputEvents.get(steamID);
+        if (q == null || q.isEmpty()) return java.util.Collections.emptyList();
+
+        java.util.List<String> list = new java.util.ArrayList<>();
+        for (String k; (k = q.poll()) != null; ) list.add(k);
+        return list;
+    }
+
+
+
     private static final java.util.Map<String, Long> clientLastSeen =
             new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Map<String, String> playerPositions =
@@ -77,6 +98,8 @@ public class Main {
                 }
             }
         }
+
+
 
         if (guiMode)
             javax.swing.SwingUtilities.invokeLater(Main::createAndShowGui);
@@ -228,6 +251,8 @@ public class Main {
         }
     }
 
+
+
     private static void startListeningThread() {
         Thread t = new Thread(() -> {
             try {
@@ -257,12 +282,11 @@ public class Main {
 
                         String[] p = reqLine.split(" ");
                         String method = p[0];
-                        String path = p.length > 1 ? p[1] : "/";
+                        String path   = p.length > 1 ? p[1] : "/";
                         boolean isPost = "POST".equalsIgnoreCase(method);
 
                         if (!isPost && path.startsWith("/cmd?steamID=")) {
-                            while (in.readLine() != null && !in.readLine().isEmpty()) {
-                            }
+                            while (in.readLine() != null && !in.readLine().isEmpty()) {}
                             String sid = URLDecoder.decode(
                                     path.substring("/cmd?steamID=".length()), "UTF-8");
                             String json = "{\"commands\":" + dequeueCommandsJson(sid) + "}";
@@ -271,12 +295,12 @@ public class Main {
                         }
 
                         int contentLen = 0;
-                        for (String h; (h = in.readLine()) != null && !h.isEmpty(); )
-                            if (h.regionMatches(true, 0, "content-length:", 0, 15))
-                                try {
-                                    contentLen = Integer.parseInt(h.substring(15).trim());
-                                } catch (NumberFormatException ignore) {
-                                }
+                        for (String h; (h = in.readLine()) != null && !h.isEmpty(); ) {
+                            if (h.regionMatches(true, 0, "content-length:", 0, 15)) {
+                                try { contentLen = Integer.parseInt(h.substring(15).trim()); }
+                                catch (NumberFormatException ignore) {}
+                            }
+                        }
 
                         String body = "";
                         if (isPost && contentLen > 0) {
@@ -291,27 +315,67 @@ public class Main {
                         }
 
                         if (isPost && !body.isEmpty()) {
-                            String evt = extractJson(body, "event").toLowerCase();
+                            String evt        = extractJson(body, "event").toLowerCase();
                             String playerName = extractJson(body, "playerName");
-                            String steamID = extractJson(body, "steamID");
+                            String steamID    = extractJson(body, "steamID");
 
                             if (playerName.isEmpty()) playerName = "Ghost";
-                            if (steamID.isEmpty()) steamID = "Unknown";
+                            if (steamID.isEmpty())    steamID    = "Unknown";
 
                             String key = clientIp + "|" + steamID + "|" + playerName;
-
                             if (!"disconnect".equals(evt))
                                 clientLastSeen.put(key, System.currentTimeMillis());
 
                             switch (evt) {
+
+                                case "axis": {
+                                    String axis = extractJson(body, "axis");
+                                    String val  = extractJson(body, "val");
+                                    addInputEvent(steamID, "AXIS:" + axis + ':' + val);
+                                    break;
+                                }
+
+                                case "input": {
+                                    String keyName = extractJson(body, "key");
+                                    addInputEvent(steamID, keyName);
+                                    break;
+                                }
+
+                                case "pos": {
+                                    try {
+                                        double x  = Double.parseDouble(extractJson(body, "x"));
+                                        double y  = Double.parseDouble(extractJson(body, "y"));
+                                        double z  = Double.parseDouble(extractJson(body, "z"));
+                                        double rx = Double.parseDouble(extractJson(body, "rx"));
+                                        double ry = Double.parseDouble(extractJson(body, "ry"));
+                                        double rz = Double.parseDouble(extractJson(body, "rz"));
+
+                                        String pos = x + "," + y + "," + z;
+                                        String rot = rx + "," + ry + "," + rz;
+                                        playerPositions.put(steamID, pos);
+                                        playerRotations.put(steamID, rot);
+
+                                        String camX = extractJson(body, "camx");
+                                        if (!camX.isEmpty()) {
+                                            double cx = Double.parseDouble(camX);
+                                            double cy = Double.parseDouble(extractJson(body, "camy"));
+                                            double cz = Double.parseDouble(extractJson(body, "camz"));
+                                            cameraPositions.put(steamID, cx + "," + cy + "," + cz);
+                                        }
+                                    } catch (NumberFormatException ignore) {}
+                                    break;
+                                }
+
                                 case "ack": {
                                     String cmdType = extractJson(body, "cmd");
-                                    String label = extractJson(body, "label");
+                                    String label   = extractJson(body, "label");
                                     if (!SUPPRESS_ACK_LABELS.contains(label))
                                         log("[INFO] Confirmed " + cmdType +
                                                 " → '" + label + "' for SteamID=" + steamID);
                                     break;
                                 }
+
+                                /* ── object snapshot ───────────────────── */
                                 case "objects": {
                                     String data = extractJson(body, "data");
                                     playerObjects.put(steamID, data);
@@ -327,6 +391,8 @@ public class Main {
                                             playerRotations.get(steamID));
                                     break;
                                 }
+
+                                /* ── explicit disconnect ───────────────── */
                                 case "disconnect": {
                                     log("[INFO] Disconnect        from " + clientIp +
                                             " | Name=\"" + playerName + "\", SteamID=" + steamID);
@@ -337,8 +403,11 @@ public class Main {
                                     cameraPositions.remove(steamID);
                                     runningClients.remove(steamID);
                                     pausedClients.remove(steamID);
+                                    activeClients.remove(key);
                                     break;
                                 }
+
+                                /* ── pause / resume state ─────────────── */
                                 case "pause": {
                                     String state = extractJson(body, "state").toLowerCase();
                                     boolean on = "on".equals(state) || "true".equals(state) || "1".equals(state);
@@ -353,10 +422,12 @@ public class Main {
                                     }
                                     break;
                                 }
-                                default:
-                                    break;
+
+                                /* ── unknown / unhandled ──────────────── */
+                                default: break;
                             }
 
+                            /* first sighting (non-disconnect) → connect log */
                             if (!activeClients.contains(key) && !"disconnect".equals(evt)) {
                                 activeClients.add(key);
                                 log("[INFO] Connect           from " + clientIp +
@@ -370,10 +441,7 @@ public class Main {
                     } catch (IOException ex) {
                         log("[WARN] Error handling client " + clientIp + ": " + ex.getMessage());
                     } finally {
-                        try {
-                            client.close();
-                        } catch (IOException ignore) {
-                        }
+                        try { client.close(); } catch (IOException ignore) {}
                     }
                 }
             } catch (IOException e) {
@@ -383,6 +451,10 @@ public class Main {
         t.setDaemon(true);
         t.start();
     }
+
+
+
+
 
     private static void respondForbidden(PrintWriter out) {
         String body = "Forbidden";
@@ -586,15 +658,16 @@ public class Main {
     }
 
     private static void consoleCommandLoop() {
-        try (java.io.BufferedReader in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(System.in))) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(System.in))) {
 
             for (String line; (line = in.readLine()) != null; ) {
                 line = line.trim();
+                if (line.isEmpty()) continue;
 
-                if (ExtensionManager.broadcastConsoleInput(line))
-                    continue;
+                /* ── extension commands ────────────────────────────── */
+                if (ExtensionManager.handleConsole(line)) continue;
 
+                /* ── built-in commands ─────────────────────────────── */
                 if (line.equalsIgnoreCase("help") || line.equals("?")) {
                     log("[INFO] Commands:");
                     log("[INFO]   stop");
@@ -603,6 +676,7 @@ public class Main {
                     log("[INFO]   clientsideobject <steamID>");
                     log("[INFO]   create <steamID> <src> x y z rx ry rz [ … ]");
                     log("[INFO]   edit   <steamID> <targetName> [ … ]");
+                    log("[INFO]   ext <sub> …   (see ‘ext help’)");
                     continue;
                 }
 
@@ -897,7 +971,7 @@ public class Main {
             });
         }
 
-        ExtensionManager.broadcastLog(ts);
+        ExtensionManager.handleConsole(ts);
     }
 
     private static String nowTimestamp() {

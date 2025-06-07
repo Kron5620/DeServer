@@ -35,8 +35,12 @@ public class ClientManager : ModBehaviour
         public Dictionary<string,bool> components;
     }
 
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs – FULL Start()   (now starts InputLoop)
+    // ─────────────────────────────────────────────────────────────
     private void Start()
     {
+        // Fetch Steam / player identification
         id = FetchId();
         if (id == null)
         {
@@ -44,10 +48,146 @@ public class ClientManager : ModBehaviour
             Debug.LogWarning("[ClientManager] Steam info missing – defaulting to Ghost/Unknown.");
         }
 
+        // Immediate blocking handshake so the server *always* sees “Connect”
+        PostBlocking("connect", null, null);
+        connected = true;   // mark as connected so NetLoop jumps straight to pos/objects
+        Debug.Log("[ClientManager] Connected (initial handshake sent).");
+
+        // Kick off the usual background coroutines
         StartCoroutine(NetLoop());
         StartCoroutine(CommandLoop());
         StartCoroutine(PauseLoop());
+
+        // NEW: send every button / key press to the server
+        StartCoroutine(InputLoop());
     }
+
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs – FULL InputLoop()
+    //  Sends key-down events *and* axis/joystick values.
+    // ─────────────────────────────────────────────────────────────
+    private IEnumerator InputLoop()
+    {
+        /* list of axis names you want streamed.
+           Add / remove names to match your Unity Input Manager.           */
+        string[] axes =
+        {
+            "Horizontal", "Vertical",
+            "Mouse X", "Mouse Y", "Mouse ScrollWheel",
+            "JoystickAxis1", "JoystickAxis2", "JoystickAxis3",
+            "JoystickAxis4", "JoystickAxis5", "JoystickAxis6",
+            "JoystickAxis7", "JoystickAxis8", "JoystickAxis9",
+            "JoystickAxis10"
+        };
+
+        /* remember last value we sent for each axis so we only
+           transmit when it changes more than ±0.01              */
+        Dictionary<string, float> lastAxis = new Dictionary<string, float>(axes.Length);
+
+        while (true)
+        {
+            /* ---------- keys / buttons (fires once per key-down frame) ---------- */
+            if (connected && Input.anyKeyDown)
+            {
+                foreach (KeyCode code in System.Enum.GetValues(typeof(KeyCode)))
+                {
+                    if (!Input.GetKeyDown(code)) continue;
+
+                    UnityWebRequest req = BuildInput(code.ToString());
+                    yield return req.SendWebRequest();
+                }
+            }
+
+            /* ---------- axes / joysticks (fires every frame if changed) ---------- */
+            if (connected)
+            {
+                foreach (string a in axes)
+                {
+                    float v = Input.GetAxisRaw(a);              // current sample
+                    float prev;
+                    lastAxis.TryGetValue(a, out prev);
+
+                    if (Mathf.Abs(v - prev) > 0.01f)            // threshold
+                    {
+                        UnityWebRequest req = BuildAxis(a, v);
+                        yield return req.SendWebRequest();
+                        lastAxis[a] = v;                        // remember
+                    }
+                }
+            }
+
+            yield return null;   // next frame
+        }
+    }
+
+
+
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs – BuildAxis helper
+    //  Crafts POST body: {event:"axis", axis:"Horizontal", val:0.6, …}
+    // ─────────────────────────────────────────────────────────────
+    private UnityWebRequest BuildAxis(string axisName, float value)
+    {
+        string body = "{\"event\":\"axis\"" +
+                      ",\"axis\":\"" + axisName + "\"" +
+                      ",\"val\":" + value.ToString("F4") +
+                      ",\"playerName\":\"" + id.playerName + "\"" +
+                      ",\"steamID\":\"" + id.steamID + "\"}";
+
+        byte[] bytes = Encoding.UTF8.GetBytes(body);
+        string url   = "http://" + serverIp + ":" + serverPort + "/";
+        UnityWebRequest req = new UnityWebRequest(url, "POST");
+        req.uploadHandler   = new UploadHandlerRaw(bytes);
+        req.downloadHandler = new DownloadHandlerBuffer();
+        req.SetRequestHeader("Content-Type", "application/json");
+        req.timeout = timeoutSec;
+        return req;
+    }
+
+
+
+
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs – BuildInput helper
+    // ─────────────────────────────────────────────────────────────
+    private UnityWebRequest BuildInput(string key)
+    {
+        string body = "{\"event\":\"input\"" +
+                      ",\"key\":\"" + key + "\"" +
+                      ",\"playerName\":\"" + id.playerName + "\"" +
+                      ",\"steamID\":\"" + id.steamID + "\"}";
+
+        byte[] bytes = Encoding.UTF8.GetBytes(body);
+        string url   = "http://" + serverIp + ":" + serverPort + "/";
+        UnityWebRequest req = new UnityWebRequest(url, "POST");
+        req.uploadHandler   = new UploadHandlerRaw(bytes);
+        req.downloadHandler = new DownloadHandlerBuffer();
+        req.SetRequestHeader("Content-Type", "application/json");
+        req.timeout = timeoutSec;
+        return req;
+    }
+
+
+
+
+
+    // Time-queued sub-command
+    [System.Serializable]
+    private class TimelineEntry
+    {
+        public float  offset;   // seconds from reception (0 = immediately)
+        public string json;     // raw JSON of the sub-command to execute
+    }
+
+    // “timeline” umbrella command
+    [System.Serializable]
+    private class TimelineCmd
+    {
+        public string         cmd;    // always "timeline"
+        public string         label;  // optional label for ACKs / logging
+        public TimelineEntry[] entries;
+    }
+
 
     private bool isInPauseMenu()
     {
@@ -264,7 +404,17 @@ public class ClientManager : ModBehaviour
         if (string.IsNullOrEmpty(json))
             return;
 
-        if (json.IndexOf("\"cmd\":\"create\"") != -1)
+        // ────────────────────────────────  new branch  ────────────────────────────────
+        if (json.IndexOf("\"cmd\":\"timeline\"", System.StringComparison.OrdinalIgnoreCase) != -1)
+        {
+            TimelineCmd tl = JsonUtility.FromJson<TimelineCmd>(json);
+            if (tl != null && tl.entries != null && tl.entries.Length > 0)
+                ApplyTimeline(tl);
+            return;
+        }
+        // ──────────────────────────────────────────────────────────────────────────────
+
+        if (json.IndexOf("\"cmd\":\"create\"", System.StringComparison.OrdinalIgnoreCase) != -1)
         {
             CreateCmd c = JsonUtility.FromJson<CreateCmd>(json);
             if (c != null && c.components == null)
@@ -273,14 +423,14 @@ public class ClientManager : ModBehaviour
             return;
         }
 
-        if (json.IndexOf("\"cmd\":\"mesh\"") != -1)
+        if (json.IndexOf("\"cmd\":\"mesh\"", System.StringComparison.OrdinalIgnoreCase) != -1)
         {
             MeshCmd m = JsonUtility.FromJson<MeshCmd>(json);
             if (m != null) ApplyMesh(m);
             return;
         }
 
-        if (json.IndexOf("\"cmd\":\"edit\"") != -1)
+        if (json.IndexOf("\"cmd\":\"edit\"", System.StringComparison.OrdinalIgnoreCase) != -1)
         {
             EditCmd e = JsonUtility.FromJson<EditCmd>(json);
             if (e != null && e.components == null)
@@ -289,20 +439,49 @@ public class ClientManager : ModBehaviour
             return;
         }
 
-        if (json.IndexOf("\"cmd\":\"tween\"") != -1)
+        if (json.IndexOf("\"cmd\":\"tween\"", System.StringComparison.OrdinalIgnoreCase) != -1)
         {
             TweenCmd t = JsonUtility.FromJson<TweenCmd>(json);
             if (t != null) ApplyTween(t);
             return;
         }
 
-        if (json.IndexOf("\"cmd\":\"turn\"") != -1)
+        if (json.IndexOf("\"cmd\":\"turn\"", System.StringComparison.OrdinalIgnoreCase) != -1)
         {
             TurnCmd old = JsonUtility.FromJson<TurnCmd>(json);
             if (old != null) ApplyTurn(old);
             return;
         }
     }
+
+    private void ApplyTimeline(TimelineCmd tl)
+    {
+        // sort entries just in case the server sent them out of order
+        System.Array.Sort(tl.entries, (a, b) => a.offset.CompareTo(b.offset));
+        StartCoroutine(TimelineRoutine(tl));
+    }
+
+    private IEnumerator TimelineRoutine(TimelineCmd tl)
+    {
+        float startTime = Time.realtimeSinceStartup;
+
+        foreach (TimelineEntry entry in tl.entries)
+        {
+            // wait until the scheduled moment
+            float targetTime = startTime + Mathf.Max(0f, entry.offset);
+            float wait = targetTime - Time.realtimeSinceStartup;
+            if (wait > 0f)
+                yield return new WaitForSecondsRealtime(wait);
+
+            // execute the sub-command locally (recursive call into ApplyCommand)
+            ApplyCommand(entry.json);
+        }
+
+        // notify server that the whole timeline finished
+        SendAck("timeline", tl.label ?? "timeline");
+    }
+
+
 
     private void ApplyTween(TweenCmd t)
     {
@@ -433,10 +612,13 @@ public class ClientManager : ModBehaviour
         SendAck("turn", label);
     }
 
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs  –  FULL ApplyEdit method (Unity 2017 / C#4)
+    // ─────────────────────────────────────────────────────────────
     private void ApplyEdit(EditCmd e)
     {
+        /* ---------- locate target GameObject ---------- */
         GameObject go = GameObject.Find(e.target);
-
         if (go == null && e.target == "Player_Human")
             go = GameObject.Find("Player_Human");
 
@@ -452,6 +634,7 @@ public class ClientManager : ModBehaviour
             }
         }
 
+        /* ---------- delete request ---------- */
         if (e.delete)
         {
             Destroy(go);
@@ -460,8 +643,12 @@ public class ClientManager : ModBehaviour
             return;
         }
 
-        bool isPlayer  = go.name == "Player_Human";
-        bool needsMove = isPlayer || e.x != 0f || e.y != 0f || e.z != 0f;
+        /* ---------- movement / rotation / scale ---------- */
+        bool isPlayer     = (go.name == "Player_Human");
+        bool hasPosValues = (e.x != 0f || e.y != 0f || e.z != 0f);
+        bool colorGiven   = (!string.IsNullOrEmpty(e.color) && !"none".Equals(e.color));
+
+        bool needsMove = hasPosValues || (isPlayer && !colorGiven);
 
         if (needsMove)
         {
@@ -474,11 +661,11 @@ public class ClientManager : ModBehaviour
 
             if (cc != null) cc.enabled = true;
 
-            Rigidbody rb = go.GetComponent<Rigidbody>();
-            if (rb != null)
+            Rigidbody rbVel = go.GetComponent<Rigidbody>();
+            if (rbVel != null)
             {
-                rb.velocity        = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
+                rbVel.velocity        = Vector3.zero;
+                rbVel.angularVelocity = Vector3.zero;
             }
         }
 
@@ -488,21 +675,21 @@ public class ClientManager : ModBehaviour
         if (e.sx != 1f || e.sy != 1f || e.sz != 1f)
             go.transform.localScale = new Vector3(e.sx, e.sy, e.sz);
 
+        /* ---------- rename / colour / texture copy ---------- */
         if (!string.IsNullOrEmpty(e.rename))
             go.name = e.rename;
 
-        if (!string.IsNullOrEmpty(e.color) && !"none".Equals(e.color))
+        if (colorGiven)
         {
             string cs = e.color.Length == 6 && !e.color.StartsWith("#") ? "#" + e.color : e.color;
-            Color col;
-            if (ColorUtility.TryParseHtmlString(cs, out col))
+            Color parsedColor;
+            if (ColorUtility.TryParseHtmlString(cs, out parsedColor))
             {
-                Renderer r = go.GetComponent<Renderer>();
-                if (r != null)
+                foreach (Renderer ren in go.GetComponentsInChildren<Renderer>(true))
                 {
-                    if (r.material == null)
-                        r.material = new Material(Shader.Find("Standard"));
-                    r.material.color = col;
+                    if (ren.material == null)
+                        ren.material = new Material(Shader.Find("Standard"));
+                    ren.material.color = parsedColor;
                 }
             }
         }
@@ -512,13 +699,14 @@ public class ClientManager : ModBehaviour
             GameObject src = GameObject.Find(e.copytex);
             if (src != null)
             {
-                Renderer sr = src.GetComponent<Renderer>();
-                Renderer tr = go.GetComponent<Renderer>();
-                if (sr != null && tr != null && sr.material != null)
-                    tr.material = sr.material;
+                Renderer[] sr = src.GetComponentsInChildren<Renderer>(true);
+                Renderer[] tr = go.GetComponentsInChildren<Renderer>(true);
+                if (sr.Length > 0 && tr.Length > 0 && sr[0].material != null)
+                    foreach (Renderer r in tr) r.material = sr[0].material;
             }
         }
 
+        /* ---------- component toggles  (now checks children) ---------- */
         if (e.components != null)
         {
             foreach (KeyValuePair<string, bool> kv in e.components)
@@ -533,33 +721,57 @@ public class ClientManager : ModBehaviour
                     continue;
                 }
 
-                Component comp = go.GetComponent(t);
-                if (comp == null) comp = AddComponent(t, go);
-                if (comp == null) continue;
+                // all matching components in target hierarchy
+                Component[] comps = go.GetComponentsInChildren(t, true);
+                bool found = comps != null && comps.Length > 0;
 
-                Collider col = comp as Collider;
-                if (col != null) { col.enabled = turnOn; continue; }
-
-                Rigidbody rb = comp as Rigidbody;
-                if (rb != null)
+                // if enabling and none found → add one on root
+                if (!found && turnOn)
                 {
-                    rb.isKinematic      = !turnOn;
-                    rb.useGravity       = turnOn;
-                    rb.detectCollisions = turnOn;
+                    Component added = AddComponent(t, go);
+                    if (added != null)
+                        comps = new Component[] { added };
+                    found = comps.Length > 0;
+                }
+
+                if (!found)
+                {
+                    Debug.LogWarning("[ClientManager] Component '" + compName +
+                                     "' not found on '" + go.name + "' or its children.");
                     continue;
                 }
 
-                Renderer rendComp = comp as Renderer;
-                if (rendComp != null) { rendComp.enabled = turnOn; continue; }
+                foreach (Component comp in comps)
+                {
+                    Collider col = comp as Collider;
+                    if (col != null) { col.enabled = turnOn; continue; }
 
-                Behaviour behComp = comp as Behaviour;
-                if (behComp != null) { behComp.enabled = turnOn; continue; }
+                    Rigidbody rb = comp as Rigidbody;
+                    if (rb != null)
+                    {
+                        rb.isKinematic      = !turnOn;
+                        rb.useGravity       = turnOn;
+                        rb.detectCollisions = turnOn;
+                        continue;
+                    }
+
+                    Renderer rendComp = comp as Renderer;
+                    if (rendComp != null) { rendComp.enabled = turnOn; continue; }
+
+                    Behaviour beh = comp as Behaviour;
+                    if (beh != null) { beh.enabled = turnOn; continue; }
+                }
             }
         }
 
         Debug.Log("[ClientManager] Edited object → " + go.name);
         SendAck("edit", go.name);
     }
+
+
+
+
+
 
     [System.Serializable]
     private class TurnCmd
@@ -686,15 +898,29 @@ public class ClientManager : ModBehaviour
                 + dto.t.Length / 3);
     }
 
+    // ─────────────────────────────────────────────────────────────
+    //  ClientManager.cs  –  FULL ApplyCreate method (Unity 2017 / C#4)
+    // ─────────────────────────────────────────────────────────────
     private void ApplyCreate(CreateCmd c)
     {
+        /* ---------- locate prototype ---------- */
         GameObject prototype = GameObject.Find(c.src);
+
         if (prototype == null)
         {
-            Debug.LogWarning("[ClientManager] Prototype '" + c.src + "' not found – command ignored.");
+            // fallback: search inactive & assets loaded in memory
+            foreach (GameObject g in Resources.FindObjectsOfTypeAll<GameObject>())
+                if (g.name == c.src) { prototype = g; break; }
+        }
+
+        if (prototype == null)
+        {
+            Debug.LogWarning("[ClientManager] Create: prototype '" + c.src + "' not found.");
+            SendAck("create", c.src);   // still ACK so server logs something
             return;
         }
 
+        /* ---------- instantiate ---------- */
         GameObject go = Instantiate(prototype);
 
         go.transform.position   = new Vector3(c.x,  c.y,  c.z);
@@ -710,8 +936,7 @@ public class ClientManager : ModBehaviour
             Color col;
             if (ColorUtility.TryParseHtmlString(cs, out col))
             {
-                Renderer r = go.GetComponent<Renderer>();
-                if (r != null)
+                foreach (Renderer r in go.GetComponentsInChildren<Renderer>(true))
                 {
                     if (r.material == null)
                         r.material = new Material(Shader.Find("Standard"));
@@ -734,31 +959,41 @@ public class ClientManager : ModBehaviour
                     continue;
                 }
 
-                Component comp = go.GetComponent(t);
-                if (comp == null) comp = AddComponent(t, go);
-                if (comp == null) continue;
+                Component[] comps = go.GetComponentsInChildren(t, true);
+                bool found = comps.Length > 0;
 
-                Collider col = comp as Collider;
-                if (col != null) { if (turnOn) col.enabled = true; else Destroy(col); continue; }
-
-                Rigidbody rb = comp as Rigidbody;
-                if (rb != null) {
-                    if (turnOn) { rb.isKinematic=false; rb.useGravity=true; rb.detectCollisions=true; }
-                    else        { rb.isKinematic=true;  rb.useGravity=false; rb.detectCollisions=false; }
-                    continue;
+                if (!found && turnOn)
+                {
+                    AddComponent(t, go);
+                    comps = go.GetComponentsInChildren(t, true);
                 }
 
-                Renderer rend = comp as Renderer;
-                if (rend != null) { rend.enabled = turnOn; continue; }
+                foreach (Component comp in comps)
+                {
+                    Collider colComp = comp as Collider;
+                    if (colComp != null) { colComp.enabled = turnOn; continue; }
 
-                Behaviour beh = comp as Behaviour;
-                if (beh != null) { beh.enabled = turnOn; continue; }
+                    Rigidbody rb = comp as Rigidbody;
+                    if (rb != null) {
+                        rb.isKinematic      = !turnOn;
+                        rb.useGravity       = turnOn;
+                        rb.detectCollisions = turnOn;
+                        continue;
+                    }
+
+                    Renderer rend = comp as Renderer;
+                    if (rend != null) { rend.enabled = turnOn; continue; }
+
+                    Behaviour beh = comp as Behaviour;
+                    if (beh != null) { beh.enabled = turnOn; continue; }
+                }
             }
         }
 
         Debug.Log("[ClientManager] Spawned object via command → " + go.name);
         SendAck("create", go.name);
     }
+
 
     private static Dictionary<string, bool> ParseComponents(string json)
     {
@@ -903,6 +1138,19 @@ public class ClientManager : ModBehaviour
         sb.Append(']');
         return sb.ToString();
     }
+
+    // ─────────────────────────────────────────────────────────────
+    //  Add this class to ClientManager.cs (outside the ClientManager
+    //  mono-behaviour).  It is serialisable so Unity’s JsonUtility
+    //  can fill it, exactly as FetchId() expects.
+    // ─────────────────────────────────────────────────────────────
+    [System.Serializable]
+    public class Identification
+    {
+        public string playerName = "Ghost";
+        public string steamID    = "Unknown";
+    }
+
 
     private static Identification FetchId()
     {

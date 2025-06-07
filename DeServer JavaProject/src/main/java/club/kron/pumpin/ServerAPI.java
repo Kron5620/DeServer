@@ -9,6 +9,10 @@ public final class ServerAPI {
         Main.log("[EXT] " + msg);
     }
 
+    public java.util.List<String> pollInputs(String steamID) {
+        return Main.pollInputs(steamID);
+    }
+
     public boolean isPaused(String sid) {
         return Main.isPaused(sid);
     }
