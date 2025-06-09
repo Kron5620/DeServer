@@ -522,17 +522,27 @@ public class Main {
                          clientLastSeen.entrySet().iterator(); it.hasNext(); ) {
                         java.util.Map.Entry<String, Long> e = it.next();
                         if (e.getValue() < cutoff) {
-                            String[] parts = e.getKey().split("\\|", 3);
+                            String key = e.getKey();
+                            String[] parts = key.split("\\|", 3);
                             String ip = parts[0];
-                            String sid = parts[1];
-                            String name = parts[2];
+                            String steamID = parts[1];
+                            String playerName = parts[2];
 
-                            log("[INFO] Disconnect (timeout) from " + ip
-                                    + " | Name=\"" + name + "\", SteamID=" + sid);
+                            log("[INFO] Disconnect (timeout) from " + ip +
+                                    " | Name=\"" + playerName + "\", SteamID=" + steamID);
+
                             it.remove();
-                            runningClients.remove(sid);
+
+                            playerPositions.remove(steamID);
+                            playerRotations.remove(steamID);
+                            playerObjects.remove(steamID);
+                            cameraPositions.remove(steamID);
+                            runningClients.remove(steamID);
+                            pausedClients.remove(steamID);
+                            activeClients.remove(key);
                         }
                     }
+
                     Thread.sleep(2000);
                 }
             } catch (InterruptedException ignore) {
@@ -541,6 +551,7 @@ public class Main {
         m.setDaemon(true);
         m.start();
     }
+
 
     private static String extractJson(String json, String key) {
         String k = "\"" + key + "\"";
