@@ -20,6 +20,14 @@ public final class ServerAPI {
         Main.enqueueCommand(sid, json);
     }
 
+    public void loadMod(String steamID, String fileName) {
+        if (steamID == null || fileName == null) return;
+        Main.enqueueCommand(steamID,
+                "{\"cmd\":\"modload\",\"file\":\"" +
+                        fileName.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}");
+    }
+
+
     public void suppressAckLog(String label) { Main.suppressAckLabel(label); }
 
     public void teleport(String sid, double x, double y, double z) {

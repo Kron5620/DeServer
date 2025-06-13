@@ -227,11 +227,33 @@ public class Main {
 
     private static void handlePlayersFolder() {
         ensureFolder("player-data");
-        ensureFolder("config");
         ensureFolder("extensions");
-        ensureFolder("world");
+
+        ensureFolder("mods");
+        File modsDir = new File("mods");
+        File readme  = new File(modsDir, "README.txt");
+        if (!readme.exists()) {
+            try (PrintWriter pw = new PrintWriter(readme)) {
+                pw.println("Put pre-compiled *.dll mod files in this folder.");
+                pw.println("Unity’s .NET 3.5 runtime has no run-time C# compiler,");
+                pw.println("so loose *.cs scripts cannot be loaded by the client.");
+                pw.println();
+                pw.println("Quick how-to:");
+                pw.println("1.  Create a new Unity project (same Unity version).");
+                pw.println("2.  Place your mod C# script(s) there.");
+                pw.println("3.  Build them as a Class Library (DLL) targeting .NET 3.5.");
+                pw.println("4.  Copy the resulting YourMod.dll to this ‘mods’ folder.");
+                pw.println("The client will auto-download and activate the DLL.");
+                log("[INFO] Wrote mods/README.txt with DLL instructions.");
+            } catch (IOException e) {
+                log("[WARN] Could not create mods/README.txt: " + e.getMessage());
+            }
+        }
+
         log("[INFO] Server folder setup complete at " + nowTimestamp());
     }
+
+
 
     private static void ensureFolder(String folderName) {
         File dir = new File(folderName);
@@ -269,15 +291,46 @@ public class Main {
                          PrintWriter out = new PrintWriter(client.getOutputStream())) {
 
                         String reqLine = in.readLine();
-                        if (reqLine == null) {
-                            client.close();
-                            continue;
-                        }
+                        if (reqLine == null) { client.close(); continue; }
 
                         String[] p = reqLine.split(" ");
                         String method = p[0];
                         String path   = p.length > 1 ? p[1] : "/";
                         boolean isPost = "POST".equalsIgnoreCase(method);
+
+                        if (!isPost && ("/mods".equals(path) || "/mods/".equals(path))) {
+                            File dir = new File("mods");
+                            String[] files = dir.list((d, n) ->
+                                    n.toLowerCase().endsWith(".dll") || n.toLowerCase().endsWith(".cs"));
+                            if (files == null) files = new String[0];
+
+                            StringBuilder body = new StringBuilder("{\"mods\":[");
+                            for (int i = 0; i < files.length; i++) {
+                                if (i > 0) body.append(',');
+                                body.append('"').append(files[i]).append('"');
+                            }
+                            body.append("]}");
+                            respondJson(out, body.toString());
+                            continue;
+                        }
+                        if (!isPost && path.startsWith("/mods/")) {
+                            String fileName = URLDecoder.decode(
+                                    path.substring("/mods/".length()), "UTF-8");
+                            File f = new File("mods", fileName);
+                            if (!f.exists() || f.isDirectory()) {
+                                respondForbidden(out);
+                                continue;
+                            }
+                            byte[] bytes = java.nio.file.Files.readAllBytes(f.toPath());
+                            out.print("HTTP/1.1 200 OK\r\n");
+                            out.print("Content-Type: application/octet-stream\r\n");
+                            out.print("Content-Length: " + bytes.length + "\r\n");
+                            out.print("Connection: close\r\n\r\n");
+                            out.flush();
+                            client.getOutputStream().write(bytes);
+                            client.getOutputStream().flush();
+                            continue;
+                        }
 
                         if (!isPost && path.startsWith("/cmd?steamID=")) {
                             while (in.readLine() != null && !in.readLine().isEmpty()) {}
@@ -661,8 +714,7 @@ public class Main {
                 if (line.isEmpty()) continue;
 
                 if (ExtensionManager.forwardConsoleInput(line)) continue;
-
-                if (ExtensionManager.handleConsole(line)) continue;
+                if (ExtensionManager.handleConsole(line))       continue;
 
                 if (line.equalsIgnoreCase("help") || line.equals("?")) {
                     log("[INFO] Commands:");
@@ -672,6 +724,7 @@ public class Main {
                     log("[INFO]   clientsideobject <steamID>");
                     log("[INFO]   create <steamID> <src> x y z rx ry rz [ … ]");
                     log("[INFO]   edit   <steamID> <targetName> [ … ]");
+                    log("[INFO]   mod <steamID> load <file.dll>");
                     log("[INFO]   ext <sub> …   (see ‘ext help’)");
                     continue;
                 }
@@ -682,18 +735,12 @@ public class Main {
                     return;
                 }
 
-                if (line.toLowerCase().startsWith("tp ")) {
-                    handleTeleport(line);
-                    continue;
-                }
-                if (line.toLowerCase().startsWith("location ")) {
-                    handleLocation(line);
-                    continue;
-                }
-                if (line.toLowerCase().startsWith("clientsideobject ")) {
-                    handleObjects(line);
-                    continue;
-                }
+                if (line.toLowerCase().startsWith("tp "))                   { handleTeleport(line); continue; }
+                if (line.toLowerCase().startsWith("location "))            { handleLocation(line); continue; }
+                if (line.toLowerCase().startsWith("clientsideobject "))    { handleObjects(line);  continue; }
+                if (line.toLowerCase().startsWith("mod "))                 { handleMod(line);      continue; }
+
+
 
                 if (line.toLowerCase().startsWith("create ")) {
                     String[] tok = line.split("\\s+");
@@ -900,6 +947,25 @@ public class Main {
         else
             log("[INFO] Objects for " + sid + " → " + objs);
     }
+
+
+    private static void handleMod(String rawLine) {
+        String[] tok = rawLine.split("\\s+", 4);
+        if (tok.length < 4 || !"load".equalsIgnoreCase(tok[2])) {
+            log("[WARN] Usage: mod <steamID> load <file.dll>");
+            return;
+        }
+
+        String sid  = tok[1];
+        String file = tok[3];
+        String escaped = file.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        String json = "{\"cmd\":\"modload\",\"file\":\"" + escaped + "\"}";
+        enqueueCommand(sid, json);
+
+        log("[INFO] Queued mod load '" + file + "' for SteamID=" + sid);
+    }
+
 
     private static void shutdownAndExit() {
 

@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35919.96 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Descendersmod", "Descendersmod\Descendersmod.csproj", "{9EF1E005-58E2-4A86-A31E-241C9589C805}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9EF1E005-58E2-4A86-A31E-241C9589C805}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9EF1E005-58E2-4A86-A31E-241C9589C805}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9EF1E005-58E2-4A86-A31E-241C9589C805}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9EF1E005-58E2-4A86-A31E-241C9589C805}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {1F93A9C6-36C7-4C49-B5A9-E890F5210243}
+	EndGlobalSection
+EndGlobal
